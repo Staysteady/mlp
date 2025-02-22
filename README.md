@@ -161,15 +161,34 @@ tests/
 ## Project Structure
 
 ```
-src/
-  market_maker/
-    data/           # Excel reader and database operations
-    models/         # Future ML/RL models
-    utils/          # Helper functions
-    config/         # Configuration management
-tests/             # Unit tests
-  unit/            # Unit test modules
-docs/              # Documentation
+.
+├── NEON_ML.xlsm              # Main Excel data source
+├── README.md                 # Project documentation
+├── data/                     # Database files
+│   ├── market_maker.db
+│   ├── market_maker.db-shm
+│   └── market_maker.db-wal
+├── docs/                     # Additional documentation
+├── logs/                     # System log files
+│   ├── database.log
+│   ├── excel_reader.log
+│   └── market_maker.log
+├── market_maker/            # Main package directory
+│   ├── cli.py              # CLI interface
+│   ├── config/             # Configuration files
+│   ├── data/               # Data handling modules
+│   ├── main.py            # Application entry point
+│   ├── models/            # ML/RL model implementations
+│   └── utils/             # Helper utilities
+├── pyproject.toml         # Project metadata
+├── requirements.txt       # Dependencies
+├── scripts/              # Utility scripts
+│   └── populate_mock_data.py
+├── setup.py             # Package setup
+└── tests/              # Test suite
+    ├── conftest.py    # Test configuration
+    ├── test_data/     # Test data files
+    └── unit/          # Unit tests by component
 ```
 
 ## Development
