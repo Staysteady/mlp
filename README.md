@@ -4,19 +4,26 @@ A Python-based market making system that captures and processes market data from
 
 ## Quick Start
 
-1. Install dependencies:
+1. Ensure you have Python 3.10.11 installed:
+```bash
+# If using pyenv
+pyenv install 3.10.11
+pyenv local 3.10.11
+```
+
+2. Install dependencies:
 ```bash
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2. Configure your Excel file path in `src/market_maker/config/settings.py`:
+3. Configure your Excel file path in `src/market_maker/config/settings.py`:
 ```python
 EXCEL_FILE = "/path/to/your/NEON_ML.xlsm"
 ```
 
-3. Run the market maker:
+4. Run the market maker:
 ```bash
 python -m src.market_maker.main
 ```
@@ -122,33 +129,34 @@ TRADING_END_TIME = "16:00"
 - Graceful shutdown handling
 - Configurable settings for easy customization
 
-## Setup
+## Testing
 
-1. Install dependencies:
+Run the test suite:
 ```bash
-pip install -r requirements.txt
+python -m pytest tests/ -v
 ```
 
-2. Configure settings in `src/market_maker/config/settings.py`:
-- Excel file path and sheet name
-- Cell ranges for data capture
-- Timing parameters
-- Trading hours
-- Database settings
+The project uses several testing tools and frameworks:
+- `pytest`: Main testing framework
+- `freezegun`: Time manipulation for testing time-dependent functionality
+  - Used to simulate specific market hours
+  - Ensures consistent test results regardless of execution time
 
-## Running the System
+Key test areas:
+- Excel data reading and parsing
+- Database operations and monitoring
+- Trading hours validation
+- Time utilities and formatting
+- Price stability checks
 
-To start the market maker:
-
-```bash
-python -m src.market_maker.main
+Test files are organized by component:
 ```
-
-The system will:
-1. Wait for the configured startup delay
-2. Begin monitoring Excel data during trading hours
-3. Log stable price snapshots to the SQLite database
-4. Handle graceful shutdown on Ctrl+C
+tests/
+  unit/
+    data/           # Excel reader and database tests
+    utils/          # Utility function tests
+    models/         # Model tests
+```
 
 ## Project Structure
 
@@ -160,12 +168,15 @@ src/
     utils/          # Helper functions
     config/         # Configuration management
 tests/             # Unit tests
+  unit/            # Unit test modules
 docs/              # Documentation
 ```
 
 ## Development
 
+- Python 3.10.11 is the recommended version
 - The system is designed to be modular and extensible
 - Future ML/RL capabilities can be added in the models directory
 - Configuration can be modified in settings.py
-- Additional features can be added by extending existing classes 
+- Additional features can be added by extending existing classes
+- Tests should be added for new functionality using pytest and freezegun where appropriate 
