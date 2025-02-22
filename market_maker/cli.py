@@ -2,10 +2,9 @@
 Command-line interface for the market maker system.
 Provides easy access to database monitoring and log information.
 """
+# Standard library imports
 import click
 import pandas as pd
-from datetime import datetime
-from pathlib import Path
 from .utils.db_monitor import DatabaseMonitor
 from .utils.logging_config import LOGS_DIR
 
@@ -17,16 +16,15 @@ pd.set_option('display.width', None)
 @click.group()
 def cli():
     """Market Maker monitoring and management CLI."""
-    pass
 
 @cli.command()
 def stats():
     """Show general database statistics."""
     with DatabaseMonitor() as monitor:
-        stats = monitor.get_database_stats()
+        db_stats = monitor.get_database_stats()
         click.echo("\nDatabase Statistics:")
         click.echo("-------------------")
-        for key, value in stats.items():
+        for key, value in db_stats.items():
             click.echo(f"{key.replace('_', ' ').title()}: {value}")
 
 @cli.command()
@@ -92,15 +90,13 @@ def logs(lines, component):
         'database': LOGS_DIR / "database.log",
         'excel': LOGS_DIR / "excel_reader.log"
     }
-    
     log_file = log_files[component]
     if not log_file.exists():
         click.echo(f"No log file found for {component}")
         return
-    
     click.echo(f"\nRecent {component} logs (last {lines} lines):")
     click.echo("----------------------------------------")
-    with open(log_file) as f:
+    with open(log_file, encoding='utf-8') as f:
         for line in list(f)[-lines:]:
             click.echo(line.strip())
 

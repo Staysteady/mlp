@@ -1,3 +1,14 @@
-[tool.pytest]
-pythonpath = "."
-testpaths = "tests" 
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market_maker"
+version = "0.1.0"
+description = "A market making system for processing Excel data"
+requires-python = ">=3.10.11"
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+] 

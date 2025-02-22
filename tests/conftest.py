@@ -7,13 +7,14 @@ The market maker system only reads from Excel files - it never writes to them.
 All tests use mocked data to simulate Excel reading operations, ensuring we
 maintain the read-only nature of the system even in our tests.
 """
-import pytest
 from pathlib import Path
+
+import pandas as pd
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-import pandas as pd
 
-from src.market_maker.data.models import Base, Snapshot
+from market_maker.data.models import Base, Snapshot
 
 # Test database path
 TEST_DB_PATH = Path(__file__).parent / "test_data/test.db"
@@ -23,13 +24,13 @@ def test_db_engine():
     """Create a test database engine."""
     # Create test data directory if it doesn't exist
     TEST_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Create test database
     engine = create_engine(f"sqlite:///{TEST_DB_PATH}")
     Base.metadata.create_all(engine)
-    
+
     yield engine
-    
+
     # Cleanup
     if TEST_DB_PATH.exists():
         TEST_DB_PATH.unlink()
@@ -37,15 +38,15 @@ def test_db_engine():
 @pytest.fixture
 def db_session(test_db_engine):
     """Create a new database session for a test."""
-    Session = sessionmaker(bind=test_db_engine)
-    session = Session()
-    
+    session_factory = sessionmaker(bind=test_db_engine)
+    session = session_factory()
+
     # Clean up any existing data before test
     session.query(Snapshot).delete()
     session.commit()
-    
+
     yield session
-    
+
     # Clean up all data and close session after test
     session.query(Snapshot).delete()
     session.commit()
@@ -93,4 +94,4 @@ def mock_section3_data():
         'bid': [106.0, 107.0, 108.0],
         'ask': [106.5, 107.5, 108.5]
     })
-    return prompts, prices 
+    return prompts, prices

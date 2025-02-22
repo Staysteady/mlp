@@ -17,16 +17,17 @@ class DatabaseMonitor:
     def __init__(self, session: Optional[Session] = None):
         self.session = session or Session()
         self.logger = db_logger
-    
+
     def get_recent_snapshots(self, minutes: int = 5) -> List[Snapshot]:
         """Get snapshots from the last N minutes."""
         cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
         query = select(Snapshot).where(Snapshot.timestamp >= cutoff_time)
-        
+
         snapshots = self.session.execute(query).scalars().all()
-        self.logger.info(f"Retrieved {len(snapshots)} snapshots from last {minutes} minutes")
+        self.logger.info("Retrieved %(count)s snapshots from last %(minutes)s minutes",
+                        {'count': len(snapshots), 'minutes': minutes})
         return snapshots
-    
+
     def get_spread_history(self, spread_name: str, hours: int = 24) -> pd.DataFrame:
         """Get price history for a specific spread."""
         cutoff_time = datetime.utcnow() - timedelta(hours=hours)
@@ -34,14 +35,15 @@ class DatabaseMonitor:
             Snapshot.spread_name == spread_name,
             Snapshot.timestamp >= cutoff_time
         )
-        
+
         snapshots = self.session.execute(query).scalars().all()
-        
+
         # Convert to DataFrame for easier analysis
         if not snapshots:
-            self.logger.warning(f"No history found for spread {spread_name}")
+            self.logger.warning("No history found for spread %(spread)s",
+                              {'spread': spread_name})
             return pd.DataFrame()
-        
+
         data = {
             'timestamp': [s.timestamp for s in snapshots],
             'old_mid': [s.old_midpoint for s in snapshots],
@@ -51,13 +53,15 @@ class DatabaseMonitor:
             'old_ask': [s.old_ask for s in snapshots],
             'new_ask': [s.new_ask for s in snapshots]
         }
-        
+
         df = pd.DataFrame(data)
-        self.logger.info(f"Retrieved {len(df)} historical records for {spread_name}")
+        self.logger.info("Retrieved %(count)s historical records for %(spread)s",
+                        {'count': len(df), 'spread': spread_name})
         return df
-    
+
     def get_database_stats(self) -> dict:
         """Get general database statistics."""
+        # pylint: disable=not-callable
         stats = {
             'total_snapshots': self.session.scalar(select(func.count(Snapshot.id))),
             'unique_spreads': self.session.scalar(
@@ -70,18 +74,18 @@ class DatabaseMonitor:
                 select(func.max(Snapshot.timestamp))
             )
         }
-        
-        self.logger.info(f"Database stats: {stats}")
+
+        self.logger.info("Database stats: %(stats)s", {'stats': stats})
         return stats
-    
+
     def get_largest_moves(self, top_n: int = 10) -> pd.DataFrame:
         """Get the largest price moves in the database."""
         query = select(Snapshot).order_by(
             (Snapshot.new_midpoint - Snapshot.old_midpoint).desc()
         ).limit(top_n)
-        
+
         moves = self.session.execute(query).scalars().all()
-        
+
         data = {
             'timestamp': [m.timestamp for m in moves],
             'spread': [m.spread_name for m in moves],
@@ -89,14 +93,16 @@ class DatabaseMonitor:
             'new_mid': [m.new_midpoint for m in moves],
             'change': [m.new_midpoint - m.old_midpoint for m in moves]
         }
-        
+
         df = pd.DataFrame(data)
-        self.logger.info(f"Retrieved top {top_n} largest price moves")
+        self.logger.info("Retrieved top %(top_n)s largest price moves",
+                        {'top_n': top_n})
         return df
 
     def get_spread_summary(self, hours: int = 24) -> pd.DataFrame:
         """Get a summary of all spreads' activity."""
         cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        # pylint: disable=not-callable
         query = select(
             Snapshot.spread_name,
             func.count(Snapshot.id).label('updates'),
@@ -108,20 +114,22 @@ class DatabaseMonitor:
         ).group_by(
             Snapshot.spread_name
         )
-        
+
         result = self.session.execute(query).all()
-        
+
         if not result:
-            self.logger.warning(f"No spread activity in the last {hours} hours")
+            self.logger.warning("No spread activity in the last %(hours)s hours",
+                              {'hours': hours})
             return pd.DataFrame()
-        
+
         df = pd.DataFrame(result)
-        self.logger.info(f"Generated summary for {len(df)} spreads")
+        self.logger.info("Generated summary for %(count)s spreads",
+                        {'count': len(df)})
         return df
-    
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
             # If no exception occurred, commit any pending changes
@@ -129,6 +137,6 @@ class DatabaseMonitor:
         else:
             # If an exception occurred, rollback
             self.session.rollback()
-        
+
         self.session.close()
-        return False  # Re-raise any exceptions 
+        return False  # Re-raise any exceptions

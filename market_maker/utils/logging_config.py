@@ -5,7 +5,6 @@ Implements both file and console logging with different levels.
 import logging
 import sys
 from pathlib import Path
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
 # Create logs directory if it doesn't exist
@@ -21,11 +20,11 @@ def setup_logger(name: str, log_file: Path, level=logging.INFO):
     """Set up a logger with both file and console handlers."""
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    
+
     # Prevent duplicate handlers
     if logger.handlers:
         return logger
-    
+
     # Create formatters
     file_formatter = logging.Formatter(
         '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
@@ -35,7 +34,7 @@ def setup_logger(name: str, log_file: Path, level=logging.INFO):
         '%(asctime)s | %(levelname)-8s | %(message)s',
         datefmt='%H:%M:%S'
     )
-    
+
     # File handler (rotating log file)
     file_handler = RotatingFileHandler(
         log_file,
@@ -44,19 +43,19 @@ def setup_logger(name: str, log_file: Path, level=logging.INFO):
     )
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.DEBUG)
-    
+
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(console_formatter)
     console_handler.setLevel(logging.INFO)
-    
+
     # Add handlers to logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    
+
     return logger
 
 # Create loggers for different components
 main_logger = setup_logger('market_maker', MAIN_LOG)
 db_logger = setup_logger('database', DB_LOG)
-excel_logger = setup_logger('excel_reader', EXCEL_LOG) 
+excel_logger = setup_logger('excel_reader', EXCEL_LOG)
