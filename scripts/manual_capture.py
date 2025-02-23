@@ -12,6 +12,7 @@ import os
 import sys
 import math
 import re
+import numpy as np
 
 # Initialize database
 engine = init_db()
@@ -19,6 +20,7 @@ engine = init_db()
 # ANSI color codes
 GREEN = '\033[32m'
 RED = '\033[31m'
+GRAY = '\033[90m'  # Dark gray for no data
 RESET = '\033[0m'
 
 def color_text(text, color):
@@ -50,7 +52,7 @@ def is_valid_spread(date1, date2, value):
         bool: True if spread is valid, False otherwise
     """
     # Skip if any of the inputs are None or empty
-    if any(x is None for x in [date1, date2, value]):
+    if any(x is None for x in [date1, date2]):
         return False
         
     # Convert datetime objects to strings in MMM-YY format
@@ -70,8 +72,9 @@ def is_valid_spread(date1, date2, value):
     # Try to convert value to float and check if it's valid
     try:
         float_value = float(value)
-        if math.isnan(float_value):  # Only filter NaN, allow zero values
-            return False
+        # Allow NaN values to pass through - we'll handle them separately
+        if math.isnan(float_value):
+            return True
     except (ValueError, TypeError):
         return False
         
@@ -99,45 +102,85 @@ def is_valid_spread(date1, date2, value):
 
 class PricePoint:
     """Class to track price stability."""
-    def __init__(self, spread, value, timestamp, is_primary=False):
+    def __init__(self, spread, value, timestamp, bid=0.0, ask=0.0, bid_volume=0, ask_volume=0, is_primary=False):
         self.spread = spread
         self.value = self._safe_float_conversion(value)
+        self.bid = self._safe_float_conversion(bid)
+        self.ask = self._safe_float_conversion(ask)
+        self.bid_volume = bid_volume
+        self.ask_volume = ask_volume
         self.first_seen = timestamp
         self.last_seen = timestamp
         self.unchanged_since = timestamp
         self.is_stable = False  # Start as unstable
         self.is_recorded = False  # Track if we've recorded this value
         self.last_recorded_value = self._safe_float_conversion(value)  # Initialize with current value
+        self.last_recorded_bid = self._safe_float_conversion(bid)  # Track last recorded bid
+        self.last_recorded_ask = self._safe_float_conversion(ask)  # Track last recorded ask
         self.is_primary = is_primary  # Whether this is a primary spread (Section 1, rows 4-29)
         self.dependency = None  # Track which primary spread caused this change
 
     def _safe_float_conversion(self, value):
         """Safely convert a value to float, handling various types."""
         if value is None:
-            return 0.0
+            return None
         if isinstance(value, (int, float)):
             return float(value)
         if isinstance(value, str):
             try:
                 return float(value)
             except ValueError:
-                return 0.0
-        return 0.0  # Default for any other type (datetime, etc)
+                return None
+        return None  # Default for any other type (datetime, etc)
     
-    def update(self, value, timestamp, dependency=None):
-        """Update price point with new value."""
+    def update(self, value, timestamp, bid=None, ask=None, bid_volume=None, ask_volume=None, dependency=None):
+        """Update price point with new values."""
         try:
             current_value = self._safe_float_conversion(value)
-            if abs(self.value - current_value) >= MIN_PRICE_CHANGE:
+            current_bid = self._safe_float_conversion(bid) if bid is not None else self.bid
+            current_ask = self._safe_float_conversion(ask) if ask is not None else self.ask
+            
+            # Update volumes without tracking changes
+            if bid_volume is not None:
+                self.bid_volume = bid_volume
+            if ask_volume is not None:
+                self.ask_volume = ask_volume
+            
+            # Check if any price has changed significantly
+            mid_changed = False
+            bid_changed = False
+            ask_changed = False
+            
+            if current_value is not None and self.value is not None:
+                mid_changed = abs(self.value - current_value) >= MIN_PRICE_CHANGE
+            elif current_value != self.value:  # One is None and the other isn't
+                mid_changed = True
+                
+            if current_bid is not None and self.bid is not None:
+                bid_changed = abs(self.bid - current_bid) >= MIN_PRICE_CHANGE
+            elif current_bid != self.bid:  # One is None and the other isn't
+                bid_changed = True
+                
+            if current_ask is not None and self.ask is not None:
+                ask_changed = abs(self.ask - current_ask) >= MIN_PRICE_CHANGE
+            elif current_ask != self.ask:  # One is None and the other isn't
+                ask_changed = True
+            
+            if mid_changed or bid_changed or ask_changed:
                 # Price changed significantly, reset stability tracking
-                old_value = self.last_recorded_value  # Use last recorded value instead of current
+                old_value = self.last_recorded_value
+                old_bid = self.last_recorded_bid
+                old_ask = self.last_recorded_ask
+                
                 self.value = current_value
+                self.bid = current_bid
+                self.ask = current_ask
                 self.unchanged_since = timestamp
                 self.is_stable = False
                 self.is_recorded = False  # Reset recorded flag on significant change
                 if dependency:
                     self.dependency = dependency  # Update dependency if provided
-                return False, old_value
+                return False, (old_value, old_bid, old_ask)
             else:
                 # Price hasn't changed significantly
                 self.last_seen = timestamp
@@ -146,15 +189,17 @@ class PricePoint:
                 was_stable = self.is_stable
                 self.is_stable = stability_duration >= STABILITY_DURATION
                 # Return True only when we first become stable and haven't recorded yet
-                return (self.is_stable and not was_stable and not self.is_recorded), self.last_recorded_value
-        except (ValueError, TypeError) as e:
+                return (self.is_stable and not was_stable and not self.is_recorded), (self.last_recorded_value, self.last_recorded_bid, self.last_recorded_ask)
+        except Exception as e:
             print(f"Error updating price point: {e}")
-            return False, self.last_recorded_value
+            return False, (self.last_recorded_value, self.last_recorded_bid, self.last_recorded_ask)
 
     def mark_recorded(self):
         """Mark this price point as having been recorded."""
         self.is_recorded = True
         self.last_recorded_value = self.value  # Update last recorded value
+        self.last_recorded_bid = self.bid  # Update last recorded bid
+        self.last_recorded_ask = self.ask  # Update last recorded ask
 
 def format_date(date_val):
     """Format date value to MMM-YY format."""
@@ -505,32 +550,72 @@ class ExcelMonitor:
                 all_changes.sort(key=lambda x: (get_days(x), x[2]))
                 
                 # Print header only once
-                print("\nTime                      | Type | A/D | Spread          | Days | Value/Change")
-                print("-" * 100)
+                print("\nTime                      | Type | A/D | Spread          | Days |"
+                      " Mid Old  | Mid New  |  Mid Δ  |"
+                      " Bid Old  | Bid New  |  Bid Δ  |"
+                      " Ask Old  | Ask New  |  Ask Δ")
+                print("-" * 180)
                 
                 # Print all changes
                 for change_data in all_changes:
-                    if len(change_data) == 8:  # Has dependency info, days, and spread type
-                        time, type_, spread, new_value, old_value, dependency, days, spread_type = change_data
-                    else:
-                        time, type_, spread, new_value, old_value, dependency = change_data
-                        days = None
-                        spread_type = "D"  # Default to derived if not specified
+                    time, type_, spread, new_value, old_value, dependency, days, spread_type, new_bid, old_bid, new_ask, old_ask = change_data
                     
                     days_str = str(days) if days is not None else "N/A"
                     
-                    change = new_value - old_value
-                    change_str = f"{change:+.2f}"
-                    if change > 0:
-                        change_str = color_text(change_str, GREEN)
-                    elif change < 0:
-                        change_str = color_text(change_str, RED)
+                    # Calculate changes
+                    mid_change = new_value - old_value
+                    bid_change = new_bid - old_bid if not math.isnan(new_bid) and not math.isnan(old_bid) else None
+                    ask_change = new_ask - old_ask if not math.isnan(new_ask) and not math.isnan(old_ask) else None
                     
-                    # Add dependency info if available
-                    if dependency:
-                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {type_} {spread_type:^3} {spread:<15s} | {days_str:>4} | {old_value:9.2f} -> {new_value:9.2f} ({change_str}) [from {dependency}]")
+                    # Format bid values
+                    if math.isnan(new_bid) or math.isnan(old_bid) or (new_bid == 0 and old_bid == 0):
+                        bid_old_str = color_text("  N/A  ", GRAY)
+                        bid_new_str = color_text("  N/A  ", GRAY)
+                        bid_change_str = color_text(" N/A ", GRAY)
                     else:
-                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {type_} {spread_type:^3} {spread:<15s} | {days_str:>4} | {old_value:9.2f} -> {new_value:9.2f} ({change_str})")
+                        bid_old_str = f"{old_bid:^8.2f}"
+                        bid_new_str = f"{new_bid:^8.2f}"
+                        bid_change_str = f"{bid_change:^+7.2f}"
+                        if bid_change > 0:
+                            bid_change_str = color_text(bid_change_str, GREEN)
+                        elif bid_change < 0:
+                            bid_change_str = color_text(bid_change_str, RED)
+                    
+                    # Format ask values
+                    if math.isnan(new_ask) or math.isnan(old_ask) or (new_ask == 0 and old_ask == 0):
+                        ask_old_str = color_text("  N/A  ", GRAY)
+                        ask_new_str = color_text("  N/A  ", GRAY)
+                        ask_change_str = color_text(" N/A ", GRAY)
+                    else:
+                        ask_old_str = f"{old_ask:^8.2f}"
+                        ask_new_str = f"{new_ask:^8.2f}"
+                        ask_change_str = f"{ask_change:^+7.2f}"
+                        if ask_change > 0:
+                            ask_change_str = color_text(ask_change_str, GREEN)
+                        elif ask_change < 0:
+                            ask_change_str = color_text(ask_change_str, RED)
+                    
+                    # Format mid change
+                    mid_change_str = f"{mid_change:^+7.2f}"
+                    if mid_change > 0:
+                        mid_change_str = color_text(mid_change_str, GREEN)
+                    elif mid_change < 0:
+                        mid_change_str = color_text(mid_change_str, RED)
+                    
+                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]:<25} |"
+                          f" {type_:^4} |"
+                          f" {spread_type:^3} |"
+                          f" {spread:<15} |"
+                          f" {days_str:>4} |"
+                          f" {old_value:^8.2f} |"
+                          f" {new_value:^8.2f} |"
+                          f" {mid_change_str} |"
+                          f" {bid_old_str} |"
+                          f" {bid_new_str} |"
+                          f" {bid_change_str} |"
+                          f" {ask_old_str} |"
+                          f" {ask_new_str} |"
+                          f" {ask_change_str}")
             
             return current_values
         except Exception as e:
@@ -556,25 +641,61 @@ class ExcelMonitor:
                 current_value = float(mid) if not isinstance(mid, datetime) else 0.0
                 spread = self.format_spread_name(date1, date2)  # Use new formatting method
                 
+                # Read Fidessa data based on section
+                bid_volume = 0
+                bid_price = 0.0
+                ask_price = 0.0
+                ask_volume = 0
+                
+                try:
+                    if section == 0:
+                        # Section 1: E, F, G, H
+                        bid_volume = self.excel.read_cell(self.excel.sheet, f"E{row}")
+                        bid_price = self.excel.read_cell(self.excel.sheet, f"F{row}")
+                        ask_price = self.excel.read_cell(self.excel.sheet, f"G{row}")
+                        ask_volume = self.excel.read_cell(self.excel.sheet, f"H{row}")
+                    elif section == 1:
+                        # Section 2: AD, AE, AF, AG
+                        bid_volume = self.excel.read_cell(self.excel.sheet, f"AD{row}")
+                        bid_price = self.excel.read_cell(self.excel.sheet, f"AE{row}")
+                        ask_price = self.excel.read_cell(self.excel.sheet, f"AF{row}")
+                        ask_volume = self.excel.read_cell(self.excel.sheet, f"AG{row}")
+                    else:
+                        # Section 3: BA, BB, BC, BD
+                        bid_volume = self.excel.read_cell(self.excel.sheet, f"BA{row}")
+                        bid_price = self.excel.read_cell(self.excel.sheet, f"BB{row}")
+                        ask_price = self.excel.read_cell(self.excel.sheet, f"BC{row}")
+                        ask_volume = self.excel.read_cell(self.excel.sheet, f"BD{row}")
+                    
+                    # Convert to proper types
+                    bid_volume = int(bid_volume) if bid_volume is not None else 0
+                    ask_volume = int(ask_volume) if ask_volume is not None else 0
+                    bid_price = float(bid_price) if bid_price is not None else None
+                    ask_price = float(ask_price) if ask_price is not None else None
+                    
+                except Exception as e:
+                    # Just log the error but continue processing
+                    print(f"Warning: Could not read Fidessa data for {spread}: {e}")
+                
                 # Calculate days between for the spread
                 days = None
                 if date1 == 'C' and self.c_date:
                     date1_obj = self.c_date
-                    date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
+                    date2_obj = get_prompt_date(date2)
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
                 elif date1 == '3M' and self.three_m_date:
                     date1_obj = self.three_m_date
-                    date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
+                    date2_obj = get_prompt_date(date2)
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
                 elif date2 == '3M' and self.three_m_date:
-                    date1_obj = get_prompt_date(date1)  # This will now return third Wednesday
+                    date1_obj = get_prompt_date(date1)
                     date2_obj = self.three_m_date
                     if date1_obj:
                         days = abs((date2_obj - date1_obj).days)
                 else:
-                    days = calculate_days_between(date1, date2)  # This already uses third Wednesdays
+                    days = calculate_days_between(date1, date2)
                 
                 # Determine if this is a primary spread (Section 1, rows 4-29)
                 is_primary = section == 0 and 4 <= row <= 29
@@ -590,7 +711,10 @@ class ExcelMonitor:
                 # Check if this is a new spread or value has changed
                 if spread not in self.price_tracker:
                     # New spread - start tracking but don't show in changes
-                    self.price_tracker[spread] = PricePoint(spread, current_value, capture_time, is_primary=is_primary)
+                    self.price_tracker[spread] = PricePoint(spread, current_value, capture_time, 
+                                                          bid=bid_price, ask=ask_price,
+                                                          bid_volume=bid_volume, ask_volume=ask_volume,
+                                                          is_primary=is_primary)
                     if current_value != 0:  # Only record non-zero values
                         snapshot = Snapshot(
                             timestamp=capture_time,
@@ -599,28 +723,43 @@ class ExcelMonitor:
                             prompt2=date2,
                             old_midpoint=current_value,
                             new_midpoint=current_value,
-                            old_bid=0.0,
-                            new_bid=0.0,
-                            old_ask=0.0,
-                            new_ask=0.0
+                            old_bid=0.0 if bid_price is None else bid_price,
+                            new_bid=0.0 if bid_price is None else bid_price,
+                            old_ask=0.0 if ask_price is None else ask_price,
+                            new_ask=0.0 if ask_price is None else ask_price
                         )
                         self.session.add(snapshot)
                         self.price_tracker[spread].mark_recorded()
                 else:
                     price_point = self.price_tracker[spread]
-                    should_record, old_value = price_point.update(current_value, capture_time, dependency=primary_dependency)
+                    should_record, (old_value, old_bid, old_ask) = price_point.update(
+                        current_value, capture_time,
+                        bid=bid_price, ask=ask_price,
+                        bid_volume=bid_volume, ask_volume=ask_volume,
+                        dependency=primary_dependency
+                    )
                     
                     # Check if value has changed significantly
-                    if abs(current_value - price_point.last_recorded_value) >= MIN_PRICE_CHANGE:
+                    mid_changed = abs(current_value - price_point.last_recorded_value) >= MIN_PRICE_CHANGE
+                    bid_changed = abs(bid_price - price_point.last_recorded_bid) >= MIN_PRICE_CHANGE if bid_price is not None and price_point.last_recorded_bid is not None else False
+                    ask_changed = abs(ask_price - price_point.last_recorded_ask) >= MIN_PRICE_CHANGE if ask_price is not None and price_point.last_recorded_ask is not None else False
+                    
+                    if mid_changed or bid_changed or ask_changed:
                         # Value has changed significantly
                         if current_value != 0:  # Only show non-zero values
                             # Record the change after stability period
                             if should_record:
                                 # Add dependency info to changes list if this is a derived spread
                                 if not price_point.is_primary and price_point.dependency:
-                                    all_changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, price_point.dependency, days, spread_type))
+                                    all_changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, 
+                                                      price_point.dependency, days, spread_type,
+                                                      bid_price if bid_price is not None else np.nan, price_point.last_recorded_bid if price_point.last_recorded_bid is not None else np.nan,  # Use last recorded bid
+                                                      ask_price if ask_price is not None else np.nan, price_point.last_recorded_ask if price_point.last_recorded_ask is not None else np.nan)) # Use last recorded ask
                                 else:
-                                    all_changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, None, days, spread_type))
+                                    all_changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, 
+                                                      None, days, spread_type,
+                                                      bid_price if bid_price is not None else np.nan, price_point.last_recorded_bid if price_point.last_recorded_bid is not None else np.nan,  # Use last recorded bid
+                                                      ask_price if ask_price is not None else np.nan, price_point.last_recorded_ask if price_point.last_recorded_ask is not None else np.nan)) # Use last recorded ask
                                 
                                 snapshot = Snapshot(
                                     timestamp=capture_time,
@@ -629,18 +768,20 @@ class ExcelMonitor:
                                     prompt2=date2,
                                     old_midpoint=price_point.last_recorded_value,
                                     new_midpoint=current_value,
-                                    old_bid=0.0,
-                                    new_bid=0.0,
-                                    old_ask=0.0,
-                                    new_ask=0.0
+                                    old_bid=0.0 if price_point.last_recorded_bid is None else price_point.last_recorded_bid,
+                                    new_bid=0.0 if bid_price is None else bid_price,
+                                    old_ask=0.0 if price_point.last_recorded_ask is None else price_point.last_recorded_ask,
+                                    new_ask=0.0 if ask_price is None else ask_price
                                 )
                                 self.session.add(snapshot)
                                 price_point.mark_recorded()
                 
                 current_values[spread] = current_value
                 seen_spreads.add(spread_key)
-            except (ValueError, TypeError) as e:
-                print(f"Warning: Invalid value for spread {date1}-{date2}: {mid}")
+            except Exception as e:
+                # Only print warning for truly invalid spreads
+                if not isinstance(e, (ValueError, TypeError)):
+                    print(f"Error processing spread {date1}-{date2}: {e}")
 
 def clear_screen():
     """Clear the terminal screen."""
@@ -658,22 +799,28 @@ def print_full_snapshot(monitor, capture_time):
         print(f"3M:      {monitor.three_m_date.strftime('%Y-%m-%d') if isinstance(monitor.three_m_date, datetime) else monitor.three_m_date}")
     
     sections = [
-        ("Section 1", "A", "B", "C"),
-        ("Section 2", "Z", "AA", "AB"),
-        ("Section 3", "AW", "AX", "AY")
+        ("Section 1", "A", "B", "C", "E", "F", "G", "H"),  # Added Fidessa columns
+        ("Section 2", "Z", "AA", "AB", "AD", "AE", "AF", "AG"),  # Added Fidessa columns
+        ("Section 3", "AW", "AX", "AY", "BA", "BB", "BC", "BD")  # Added Fidessa columns
     ]
     
     # Initialize price points for monitoring without waiting for stability
-    for section_idx, (section_name, col1, col2, col3) in enumerate(sections):
+    for section_idx, (section_name, col1, col2, col3, bid_vol_col, bid_col, ask_col, ask_vol_col) in enumerate(sections):
         print(f"\n{section_name}")
-        print("-" * 120)  # Widened to accommodate new columns
-        print(f"{'Spread':<20} | {'A/D':^3} | {'Midpoint':>10} | {'Days Between':>12} | {'Dates':>30}")
-        print("-" * 120)  # Widened to accommodate new columns
+        print("-" * 140)  # Increased width
+        print(f"{'Spread':<15} | {'A/D':^3} | {'Midpoint':>12} | {'Bid':>12} | {'Ask':>12} | {'Days Between':>12} | {'Dates':>35}")
+        print("-" * 140)  # Increased width
         
         for row in range(4, 100):  # Start from row 4 where data begins
             date1 = monitor.excel.read_cell(monitor.excel.sheet, f"{col1}{row}")
             date2 = monitor.excel.read_cell(monitor.excel.sheet, f"{col2}{row}")
             mid = monitor.excel.read_cell(monitor.excel.sheet, f"{col3}{row}")
+            
+            # Read Fidessa data
+            bid_volume = monitor.excel.read_cell(monitor.excel.sheet, f"{bid_vol_col}{row}")
+            bid_price = monitor.excel.read_cell(monitor.excel.sheet, f"{bid_col}{row}")
+            ask_price = monitor.excel.read_cell(monitor.excel.sheet, f"{ask_col}{row}")
+            ask_volume = monitor.excel.read_cell(monitor.excel.sheet, f"{ask_vol_col}{row}")
             
             if is_valid_spread(date1, date2, mid):
                 # Format spread name using new format
@@ -715,11 +862,22 @@ def print_full_snapshot(monitor, capture_time):
                 
                 days_str = str(days) if days is not None else "N/A"
                 
-                print(f"{spread:<20} | {spread_type:^3} | {float(mid):10.2f} | {days_str:>12} | {dates_str:>30}")
+                # Convert bid/ask to float and handle None values
+                bid_price = float(bid_price) if bid_price is not None else None
+                ask_price = float(ask_price) if ask_price is not None else None
+                
+                # Format bid/ask display - show empty space when no volume
+                bid_display = f"{bid_price:12.2f}" if bid_price is not None else " " * 12
+                ask_display = f"{ask_price:12.2f}" if ask_price is not None else " " * 12
+                
+                print(f"{spread:<15} | {spread_type:^3} | {float(mid):12.2f} | {bid_display} | {ask_display} | {days_str:>12} | {dates_str:>35}")
                 
                 # Initialize price point for monitoring but mark as recorded
                 if spread not in monitor.price_tracker:
-                    price_point = PricePoint(spread, mid, capture_time)
+                    price_point = PricePoint(spread, mid, capture_time, 
+                                          bid=bid_price, ask=ask_price,
+                                          bid_volume=bid_volume, ask_volume=ask_volume,
+                                          is_primary=spread_type == "A")
                     price_point.mark_recorded()  # Mark as recorded so we don't show it again immediately
                     monitor.price_tracker[spread] = price_point
                     
@@ -731,10 +889,10 @@ def print_full_snapshot(monitor, capture_time):
                         prompt2=date2,
                         old_midpoint=float(mid),
                         new_midpoint=float(mid),
-                        old_bid=0.0,
-                        new_bid=0.0,
-                        old_ask=0.0,
-                        new_ask=0.0
+                        old_bid=0.0 if bid_price is None else bid_price,
+                        new_bid=0.0 if bid_price is None else bid_price,
+                        old_ask=0.0 if ask_price is None else ask_price,
+                        new_ask=0.0 if ask_price is None else ask_price
                     )
                     monitor.session.add(snapshot)
     
@@ -751,7 +909,9 @@ def show_recent_captures(minutes=5):
         since = datetime.utcnow() - timedelta(minutes=minutes)
         captures = session.query(Snapshot).filter(
             Snapshot.timestamp >= since,
-            Snapshot.old_midpoint != Snapshot.new_midpoint  # Only show actual changes
+            (Snapshot.old_midpoint != Snapshot.new_midpoint) |  # Show if any price changed
+            (Snapshot.old_bid != Snapshot.new_bid) |
+            (Snapshot.old_ask != Snapshot.new_ask)
         ).order_by(Snapshot.timestamp.asc()).all()  # Show oldest to newest
         
         if not captures:
@@ -759,10 +919,13 @@ def show_recent_captures(minutes=5):
             return
             
         print(f"\nRecent changes (last {minutes} minutes):")
-        print("-" * 120)
-        print(f"{'Timestamp':<25} | {'Spread':<15} | {'A/D':^3} | {'Days':>4} | {'Old Mid':>9} | {'New Mid':>9} | {'Change':>9}")
-        print("-" * 120)
-        
+        print("-" * 180)  # Increased width for more columns
+        print(f"Time                      | Type | A/D | Spread          | Days |"
+              f" Mid Old  | Mid New  |  Mid Δ  |"
+              f" Bid Old  | Bid New  |  Bid Δ  |"
+              f" Ask Old  | Ask New  |  Ask Δ")
+        print("-" * 180)
+
         # Create and initialize monitor
         monitor = ExcelMonitor()
         monitor.connect_to_excel()  # Connect to Excel
@@ -789,13 +952,74 @@ def show_recent_captures(minutes=5):
                 print("\nWarning: Could not read actual spreads from Excel")
         
         for capture in captures:
-            change = capture.new_midpoint - capture.old_midpoint
-            change_str = f"{change:+9.2f}"
-            if change > 0:
-                change_str = color_text(change_str, GREEN)
-            elif change < 0:
-                change_str = color_text(change_str, RED)
-                
+            # Calculate changes
+            mid_change = capture.new_midpoint - capture.old_midpoint
+            bid_change = capture.new_bid - capture.old_bid if not math.isnan(capture.new_bid) and not math.isnan(capture.old_bid) else None
+            ask_change = capture.new_ask - capture.old_ask if not math.isnan(capture.new_ask) and not math.isnan(capture.old_ask) else None
+            
+            # Format change strings
+            mid_change_str = f"{capture.old_midpoint:9.2f} -> {capture.new_midpoint:9.2f} ({mid_change:+.2f})"
+            
+            # Format bid/ask strings - show gray "No Data" if no values or zeros
+            if math.isnan(capture.new_bid) or math.isnan(capture.old_bid) or (capture.new_bid == 0 and capture.old_bid == 0):
+                bid_change_str = color_text("                 No Data                 ", GRAY)
+            else:
+                bid_change_str = f"{capture.old_bid:12.2f} -> {capture.new_bid:12.2f} ({bid_change:+.2f})"
+                if bid_change > 0:
+                    bid_change_str = color_text(bid_change_str, GREEN)
+                elif bid_change < 0:
+                    bid_change_str = color_text(bid_change_str, RED)
+            
+            if math.isnan(capture.new_ask) or math.isnan(capture.old_ask) or (capture.new_ask == 0 and capture.old_ask == 0):
+                ask_change_str = color_text("                 No Data                 ", GRAY)
+            else:
+                ask_change_str = f"{capture.old_ask:12.2f} -> {capture.new_ask:12.2f} ({ask_change:+.2f})"
+                if ask_change > 0:
+                    ask_change_str = color_text(ask_change_str, GREEN)
+                elif ask_change < 0:
+                    ask_change_str = color_text(ask_change_str, RED)
+            
+            # Color the mid change
+            mid_change_str = f"{capture.old_midpoint:12.2f} -> {capture.new_midpoint:12.2f} ({mid_change:+.2f})"
+            if mid_change > 0:
+                mid_change_color = GREEN
+            elif mid_change < 0:
+                mid_change_color = RED
+            else:
+                mid_change_color = None
+            
+            # Format mid values
+            if mid_change > 0:
+                mid_change_str = color_text(mid_change_str, mid_change_color)
+            
+            # Format bid values
+            if math.isnan(capture.old_bid) or math.isnan(capture.new_bid) or (capture.old_bid == 0 and capture.new_bid == 0):
+                bid_old_str = color_text("   N/A   ", GRAY)
+                bid_new_str = color_text("   N/A   ", GRAY)
+                bid_change_str = color_text("  N/A  ", GRAY)
+            else:
+                bid_old_str = f"{capture.old_bid:10.2f}"
+                bid_new_str = f"{capture.new_bid:10.2f}"
+                bid_change_str = f"{bid_change:+8.2f}"
+                if bid_change > 0:
+                    bid_change_str = color_text(bid_change_str, GREEN)
+                elif bid_change < 0:
+                    bid_change_str = color_text(bid_change_str, RED)
+            
+            # Format ask values
+            if math.isnan(capture.old_ask) or math.isnan(capture.new_ask) or (capture.old_ask == 0 and capture.new_ask == 0):
+                ask_old_str = color_text("   N/A   ", GRAY)
+                ask_new_str = color_text("   N/A   ", GRAY)
+                ask_change_str = color_text("  N/A  ", GRAY)
+            else:
+                ask_old_str = f"{capture.old_ask:10.2f}"
+                ask_new_str = f"{capture.new_ask:10.2f}"
+                ask_change_str = f"{ask_change:+8.2f}"
+                if ask_change > 0:
+                    ask_change_str = color_text(ask_change_str, GREEN)
+                elif ask_change < 0:
+                    ask_change_str = color_text(ask_change_str, RED)
+            
             # Calculate days between for the spread using stored prompts
             days = None
             if capture.prompt1 and capture.prompt2:  # Use stored prompts from database
@@ -829,23 +1053,61 @@ def show_recent_captures(minutes=5):
                 spread_type,
                 days,  # Store actual days for sorting
                 days_str,  # Store string version for display
-                capture.old_midpoint,
-                capture.new_midpoint,
-                change_str
+                mid_change_str,
+                bid_change_str,
+                ask_change_str
             ))
         
         # Sort all captures by days (None values go to the end)
         all_captures.sort(key=lambda x: float('inf') if x[3] is None else x[3])
         
         # Print all captures in a single sorted section
-        for (timestamp, spread_name, spread_type, days, days_str, old_mid, new_mid, change_str) in all_captures:
+        for (timestamp, spread_name, spread_type, days, days_str, mid_change_str, bid_change_str, ask_change_str) in all_captures:
+            # Format mid values
+            if mid_change > 0:
+                mid_change_color = GREEN
+            elif mid_change < 0:
+                mid_change_color = RED
+            else:
+                mid_change_color = None
+            
+            # Format bid values
+            if math.isnan(capture.old_bid) or math.isnan(capture.new_bid) or (capture.old_bid == 0 and capture.new_bid == 0):
+                bid_old_str = color_text("   N/A   ", GRAY)
+                bid_new_str = color_text("   N/A   ", GRAY)
+                bid_change_str = color_text("  N/A  ", GRAY)
+            else:
+                bid_old_str = f"{capture.old_bid:10.2f}"
+                bid_new_str = f"{capture.new_bid:10.2f}"
+                bid_change_str = f"{bid_change:+8.2f}"
+                if bid_change > 0:
+                    bid_change_str = color_text(bid_change_str, GREEN)
+                elif bid_change < 0:
+                    bid_change_str = color_text(bid_change_str, RED)
+            
+            # Format ask values
+            if math.isnan(capture.old_ask) or math.isnan(capture.new_ask) or (capture.old_ask == 0 and capture.new_ask == 0):
+                ask_old_str = color_text("   N/A   ", GRAY)
+                ask_new_str = color_text("   N/A   ", GRAY)
+                ask_change_str = color_text("  N/A  ", GRAY)
+            else:
+                ask_old_str = f"{capture.old_ask:10.2f}"
+                ask_new_str = f"{capture.new_ask:10.2f}"
+                ask_change_str = f"{ask_change:+8.2f}"
+                if ask_change > 0:
+                    ask_change_str = color_text(ask_change_str, GREEN)
+                elif ask_change < 0:
+                    ask_change_str = color_text(ask_change_str, RED)
+            
             print(f"{timestamp.strftime('%Y-%m-%d %H:%M:%S'):<25} | "
                   f"{spread_name:<15} | "
                   f"{spread_type:^3} | "
                   f"{days_str:>4} | "
-                  f"{old_mid:9.2f} | "
-                  f"{new_mid:9.2f} | "
-                  f"{change_str}")
+                  f"{capture.old_midpoint:10.2f} | "
+                  f"{capture.new_midpoint:10.2f} | "
+                  f"{color_text(f'{mid_change:+8.2f}', mid_change_color) if mid_change_color else f'{mid_change:+8.2f}'} | "
+                  f"{bid_old_str} | {bid_new_str} | {bid_change_str} | "
+                  f"{ask_old_str} | {ask_new_str} | {ask_change_str}")
             
         print(f"\nTotal changes: {len(captures)}")
         
@@ -876,8 +1138,11 @@ def capture_with_stability(duration_minutes=None):
     print_full_snapshot(monitor, start_time)
     
     print("\nMonitoring for changes:")
-    print(f"{'Time':<25} | {'Type':<4s} | {'A/D':^3} | {'Spread':<15s} | {'Days':>4} | {'Value/Change':<30s}")
-    print("-" * 100)
+    print(f"Time                      | Type | A/D | Spread          | Days |"
+          f" Mid Old  | Mid New  |  Mid Δ  |"
+          f" Bid Old  | Bid New  |  Bid Δ  |"
+          f" Ask Old  | Ask New  |  Ask Δ")
+    print("-" * 180)  # Increased width to accommodate wider columns
     
     try:
         while True:
