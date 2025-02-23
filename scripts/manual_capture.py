@@ -2,6 +2,9 @@
 Script to manually capture midpoint data from Excel with stability checks.
 Supports both Windows (win32com) and Mac (xlwings) for live Excel reading.
 """
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from market_maker.data.models import Session, Snapshot, init_db
 from market_maker.data.prompt_dates import calculate_days_between, get_prompt_date
 from datetime import datetime, timedelta
@@ -13,9 +16,11 @@ import sys
 import math
 import re
 import numpy as np
+import logging
+import argparse
 
-# Initialize database
-engine = init_db()
+# Add a module-level logger after existing imports
+logger = logging.getLogger(__name__)
 
 # ANSI color codes
 GREEN = '\033[32m'
@@ -140,6 +145,10 @@ class PricePoint:
             current_bid = self._safe_float_conversion(bid) if bid is not None else self.bid
             current_ask = self._safe_float_conversion(ask) if ask is not None else self.ask
             
+            logger.debug(f"Updating PricePoint for spread {self.spread}: current_value={current_value}, previous_value={self.value}")
+            logger.debug(f"Bid: current_bid={current_bid}, previous_bid={self.bid}, diff={(abs(self.bid - current_bid) if self.bid is not None and current_bid is not None else 'N/A')}")
+            logger.debug(f"Ask: current_ask={current_ask}, previous_ask={self.ask}, diff={(abs(self.ask - current_ask) if self.ask is not None and current_ask is not None else 'N/A')}")
+            
             # Update volumes without tracking changes
             if bid_volume is not None:
                 self.bid_volume = bid_volume
@@ -158,12 +167,12 @@ class PricePoint:
                 
             if current_bid is not None and self.bid is not None:
                 bid_changed = abs(self.bid - current_bid) >= MIN_PRICE_CHANGE
-            elif current_bid != self.bid:  # One is None and the other isn't
+            elif current_bid != self.bid:
                 bid_changed = True
                 
             if current_ask is not None and self.ask is not None:
                 ask_changed = abs(self.ask - current_ask) >= MIN_PRICE_CHANGE
-            elif current_ask != self.ask:  # One is None and the other isn't
+            elif current_ask != self.ask:
                 ask_changed = True
             
             if mid_changed or bid_changed or ask_changed:
@@ -191,7 +200,7 @@ class PricePoint:
                 # Return True only when we first become stable and haven't recorded yet
                 return (self.is_stable and not was_stable and not self.is_recorded), (self.last_recorded_value, self.last_recorded_bid, self.last_recorded_ask)
         except Exception as e:
-            print(f"Error updating price point: {e}")
+            logger.error(f"Error updating price point: {e}", exc_info=True)
             return False, (self.last_recorded_value, self.last_recorded_bid, self.last_recorded_ask)
 
     def mark_recorded(self):
@@ -667,6 +676,8 @@ class ExcelMonitor:
                         ask_price = self.excel.read_cell(self.excel.sheet, f"BC{row}")
                         ask_volume = self.excel.read_cell(self.excel.sheet, f"BD{row}")
                     
+                    logger.debug(f"Section {section} row {row}: bid_price={bid_price}, ask_price={ask_price}")
+                    
                     # Convert to proper types
                     bid_volume = int(bid_volume) if bid_volume is not None else 0
                     ask_volume = int(ask_volume) if ask_volume is not None else 0
@@ -774,7 +785,6 @@ class ExcelMonitor:
                                     new_ask=0.0 if ask_price is None else ask_price
                                 )
                                 self.session.add(snapshot)
-                                price_point.mark_recorded()
                 
                 current_values[spread] = current_value
                 seen_spreads.add(spread_key)
@@ -1113,16 +1123,7 @@ def show_recent_captures(minutes=5):
         
     finally:
         session.close()
-        if monitor and monitor.excel:
-            try:
-                if IS_WINDOWS:
-                    if hasattr(monitor.excel, 'excel'):
-                        monitor.excel.excel.Quit()  # Windows specific cleanup
-                else:
-                    if hasattr(monitor.excel, 'wb') and hasattr(monitor.excel.wb, 'app'):
-                        monitor.excel.wb.app.quit()  # Mac specific cleanup
-            except Exception as e:
-                print(f"\nWarning: Error during Excel cleanup: {e}")
+        # Do not close the Excel application to keep the Excel file open for testing.
 
 def capture_with_stability(duration_minutes=None):
     """Run continuous capture with stability checks."""
@@ -1164,9 +1165,15 @@ def capture_with_stability(duration_minutes=None):
         show_recent_captures(minutes=5)
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == 'show':
-        # Just show recent captures without monitoring
-        show_recent_captures()
-    else:
-        # Run continuous monitoring
-        capture_with_stability() 
+    # Initialize the database engine here
+    from market_maker.data.models import init_db
+    engine = init_db()
+
+    # Parse command-line arguments (if any) and run the capture process
+    parser = argparse.ArgumentParser(description='Manual capture of Excel data with stability checks')
+    # Add additional arguments as needed
+    parser.add_argument('--minutes', type=int, default=None, help='Duration in minutes for capturing data')
+    args = parser.parse_args()
+
+    # Call the appropriate capture function. For example, if capture_with_stability() is defined:
+    capture_with_stability(duration_minutes=args.minutes) 
