@@ -19,6 +19,8 @@ setup(
     install_requires=[
         "pandas",
         "sqlalchemy",
+        "xlwings;platform_system=='Darwin'",  # Mac only
+        "pywin32;platform_system=='Windows'",  # Windows only
         "pytest",
         "freezegun",
         "schedule",

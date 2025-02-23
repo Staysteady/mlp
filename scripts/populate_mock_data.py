@@ -2,7 +2,7 @@
 Script to populate the database with mock data for testing.
 """
 from datetime import datetime, timedelta
-from src.market_maker.data.models import Session, Snapshot
+from market_maker.data.models import Session, Snapshot
 
 def populate_mock_data():
     """Populate database with mock data."""

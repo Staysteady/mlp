@@ -5,9 +5,13 @@ All configurable parameters are centralized here for easy modification.
 from pathlib import Path
 import os
 
+# Get project root directory
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 # Excel file settings
-EXCEL_FILE = "/Users/johnstedman/Documents/mlp/NEON_ML.xlsm"
+EXCEL_FILE = str(PROJECT_ROOT / "NEON_ML.xlsm")
 SHEET_NAME = "AH NEON"
+PREFIX_CELL = "B2"  # Cell containing the spread prefix (e.g., "AHD")
 
 # Cell ranges for data capture
 MIDPOINT_RANGE = "C4:C29"
@@ -50,7 +54,7 @@ TRADING_END_TIME = "16:00"
 MIN_PRICE_CHANGE = 0.01  # minimum price change to log
 
 # Database settings
-DB_PATH = Path("data/market_maker.db")
+DB_PATH = PROJECT_ROOT / "data" / "market_maker.db"
 ENABLE_WAL = True  # Write-Ahead Logging for better performance
 
 # Create data directory if it doesn't exist

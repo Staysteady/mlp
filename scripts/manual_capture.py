@@ -212,11 +212,34 @@ class ExcelInterface:
     def setup_mac(self):
         """Setup Mac xlwings interface."""
         try:
-            self.wb = xw.books['NEON_ML.xlsm']
+            # First try to get existing Excel instance
+            apps = xw.apps
+            if len(apps) > 0:
+                app = apps.active
+            else:
+                # If no Excel instance, start a new one
+                app = xw.App()
+            
+            # Try to get existing workbook
+            try:
+                self.wb = app.books['NEON_ML.xlsm']
+            except:
+                # If workbook not found, try to open it from config path
+                from market_maker.config.settings import EXCEL_FILE
+                self.wb = app.books.open(EXCEL_FILE)
+            
             self.sheet = self.wb.sheets["AH NEON"]
             self.sod_sheet = self.wb.sheets["SOD"]
+            
+            # Keep reference to app
+            self.app = app
+            
         except Exception as e:
-            print(f"Error connecting to Excel on Mac: {e}")
+            print(f"\nError connecting to Excel on Mac: {e}")
+            print("Please ensure:")
+            print("1. Excel is running")
+            print("2. NEON_ML.xlsm is open")
+            print("3. You have necessary permissions")
             raise
     
     def read_range(self, sheet, start_cell, nrows, ncols):
@@ -301,8 +324,44 @@ class ExcelMonitor:
         self.excel = None
         self.c_date = None  # Store C (cash) date
         self.three_m_date = None  # Store 3M date
+        self.spread_prefix = None  # Store spread prefix from B2
         self.connect_to_excel()
         self.update_reference_dates()
+        self.load_spread_prefix()
+    
+    def load_spread_prefix(self):
+        """Load the spread prefix from cell B2."""
+        if not self.ensure_excel_connection():
+            return
+            
+        try:
+            self.spread_prefix = self.excel.read_cell(self.excel.sheet, "B2")
+            if not self.spread_prefix:
+                print("\nWarning: Could not read spread prefix from B2, using default")
+                self.spread_prefix = "AHD"  # Default prefix if not found
+        except Exception as e:
+            print(f"\nError reading spread prefix: {e}")
+            self.spread_prefix = "AHD"  # Default prefix if error
+    
+    def format_spread_name(self, date1, date2):
+        """Format spread name using prefix and without hyphens in month codes."""
+        # Handle special cases (C and 3M)
+        if date1 in ['C', '3M']:
+            # For cash or 3M first leg, format as AHDCASH-FEB25 or AHD3M-FEB25
+            leg1 = date1
+            # Remove hyphen from second leg (e.g., FEB-25 -> FEB25)
+            leg2 = date2.replace('-', '') if isinstance(date2, str) else date2.strftime("%b%y").upper()
+            return f"{self.spread_prefix}{leg1}-{leg2}"
+        elif date2 in ['C', '3M']:
+            # Remove hyphen from first leg
+            leg1 = date1.replace('-', '') if isinstance(date1, str) else date1.strftime("%b%y").upper()
+            leg2 = date2
+            return f"{self.spread_prefix}{leg1}-{leg2}"
+        else:
+            # Regular spread, remove hyphens from both legs
+            leg1 = date1.replace('-', '') if isinstance(date1, str) else date1.strftime("%b%y").upper()
+            leg2 = date2.replace('-', '') if isinstance(date2, str) else date2.strftime("%b%y").upper()
+            return f"{self.spread_prefix}{leg1}-{leg2}"
     
     def update_reference_dates(self):
         """Update C and 3M reference dates from SOD sheet."""
@@ -405,7 +464,7 @@ class ExcelMonitor:
             # Get the current values
             current_values = {}
             seen_spreads = set()  # Track spreads we've seen to avoid duplicates
-            changes = []  # Track changes for printing
+            all_changes = []  # Track all changes for unified sorting and printing
             capture_time = datetime.utcnow()
             
             # Section 1 (A-C)
@@ -414,7 +473,7 @@ class ExcelMonitor:
                 date2 = self.excel.read_cell(self.excel.sheet, f"B{row}")
                 mid = self.excel.read_cell(self.excel.sheet, f"C{row}")
                 
-                self._process_spread_data(date1, date2, mid, seen_spreads, changes, capture_time, current_values)
+                self._process_spread_data(date1, date2, mid, seen_spreads, all_changes, capture_time, current_values, row, section=0)
 
             # Section 2 (Z-AB)
             for row in range(2, 100):
@@ -422,7 +481,7 @@ class ExcelMonitor:
                 date2 = self.excel.read_cell(self.excel.sheet, f"AA{row}")
                 mid = self.excel.read_cell(self.excel.sheet, f"AB{row}")
                 
-                self._process_spread_data(date1, date2, mid, seen_spreads, changes, capture_time, current_values)
+                self._process_spread_data(date1, date2, mid, seen_spreads, all_changes, capture_time, current_values, row, section=1)
 
             # Section 3 (AW-AY)
             for row in range(2, 100):
@@ -430,21 +489,33 @@ class ExcelMonitor:
                 date2 = self.excel.read_cell(self.excel.sheet, f"AX{row}")
                 mid = self.excel.read_cell(self.excel.sheet, f"AY{row}")
                 
-                self._process_spread_data(date1, date2, mid, seen_spreads, changes, capture_time, current_values)
+                self._process_spread_data(date1, date2, mid, seen_spreads, all_changes, capture_time, current_values, row, section=2)
             
-            # Commit all changes to database
-            if changes:
+            # If we have changes, commit them and display in a unified, sorted section
+            if all_changes:
                 self.session.commit()
                 
-                # Print changes
-                print("\nTime                      | Type | Spread          | Days | Value/Change")
-                print("-" * 80)
-                for change_data in changes:
-                    if len(change_data) == 7:  # Has dependency info and days
-                        time, type_, spread, new_value, old_value, dependency, days = change_data
+                # Sort all changes by days first, then spread name
+                def get_days(x):
+                    if len(x) < 8 or x[7] is None:
+                        return float('inf')
+                    return x[7]
+                
+                # Sort strictly by days first, then spread name
+                all_changes.sort(key=lambda x: (get_days(x), x[2]))
+                
+                # Print header only once
+                print("\nTime                      | Type | A/D | Spread          | Days | Value/Change")
+                print("-" * 100)
+                
+                # Print all changes
+                for change_data in all_changes:
+                    if len(change_data) == 8:  # Has dependency info, days, and spread type
+                        time, type_, spread, new_value, old_value, dependency, days, spread_type = change_data
                     else:
                         time, type_, spread, new_value, old_value, dependency = change_data
                         days = None
+                        spread_type = "D"  # Default to derived if not specified
                     
                     days_str = str(days) if days is not None else "N/A"
                     
@@ -457,9 +528,9 @@ class ExcelMonitor:
                     
                     # Add dependency info if available
                     if dependency:
-                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {type_} {spread:<15s} | {days_str:>4} | {old_value:9.2f} -> {new_value:9.2f} ({change_str}) [from {dependency}]")
+                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {type_} {spread_type:^3} {spread:<15s} | {days_str:>4} | {old_value:9.2f} -> {new_value:9.2f} ({change_str}) [from {dependency}]")
                     else:
-                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {type_} {spread:<15s} | {days_str:>4} | {old_value:9.2f} -> {new_value:9.2f} ({change_str})")
+                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {type_} {spread_type:^3} {spread:<15s} | {days_str:>4} | {old_value:9.2f} -> {new_value:9.2f} ({change_str})")
             
             return current_values
         except Exception as e:
@@ -467,7 +538,7 @@ class ExcelMonitor:
             self.session.rollback()  # Rollback on error
             return {}
 
-    def _process_spread_data(self, date1, date2, mid, seen_spreads, changes, capture_time, current_values):
+    def _process_spread_data(self, date1, date2, mid, seen_spreads, all_changes, capture_time, current_values, row, section=0):
         """Helper method to process spread data from any section."""
         # Format dates if they are datetime objects
         if isinstance(date1, datetime):
@@ -483,41 +554,38 @@ class ExcelMonitor:
         if is_valid_spread(date1, date2, mid):
             try:
                 current_value = float(mid) if not isinstance(mid, datetime) else 0.0
-                spread = f"{date1}-{date2}"
+                spread = self.format_spread_name(date1, date2)  # Use new formatting method
                 
                 # Calculate days between for the spread
                 days = None
                 if date1 == 'C' and self.c_date:
                     date1_obj = self.c_date
-                    date2_obj = get_prompt_date(date2)
+                    date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
                 elif date1 == '3M' and self.three_m_date:
                     date1_obj = self.three_m_date
-                    date2_obj = get_prompt_date(date2)
+                    date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
                 elif date2 == '3M' and self.three_m_date:
-                    date1_obj = get_prompt_date(date1)
+                    date1_obj = get_prompt_date(date1)  # This will now return third Wednesday
                     date2_obj = self.three_m_date
                     if date1_obj:
                         days = abs((date2_obj - date1_obj).days)
                 else:
-                    days = calculate_days_between(date1, date2)
+                    days = calculate_days_between(date1, date2)  # This already uses third Wednesdays
                 
                 # Determine if this is a primary spread (Section 1, rows 4-29)
-                is_primary = False
+                is_primary = section == 0 and 4 <= row <= 29
                 primary_dependency = None
+                spread_type = "A" if is_primary else "D"
                 
                 # Check if any primary spreads have changed recently
                 for key, point in self.price_tracker.items():
                     if point.is_primary and not point.is_recorded and point.unchanged_since >= capture_time - timedelta(seconds=POLL_INTERVAL):
                         primary_dependency = key
                         break
-                
-                # Check if this is a primary spread (Section 1, rows 4-29)
-                if spread_key.startswith('A') and 4 <= int(spread_key.split('-')[1]) <= 29:
-                    is_primary = True
                 
                 # Check if this is a new spread or value has changed
                 if spread not in self.price_tracker:
@@ -550,9 +618,9 @@ class ExcelMonitor:
                             if should_record:
                                 # Add dependency info to changes list if this is a derived spread
                                 if not price_point.is_primary and price_point.dependency:
-                                    changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, price_point.dependency, days))
+                                    all_changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, price_point.dependency, days, spread_type))
                                 else:
-                                    changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, None, days))
+                                    all_changes.append((capture_time, "CHG", spread, current_value, price_point.last_recorded_value, None, days, spread_type))
                                 
                                 snapshot = Snapshot(
                                     timestamp=capture_time,
@@ -596,10 +664,10 @@ def print_full_snapshot(monitor, capture_time):
     ]
     
     # Initialize price points for monitoring without waiting for stability
-    for section_name, col1, col2, col3 in sections:
+    for section_idx, (section_name, col1, col2, col3) in enumerate(sections):
         print(f"\n{section_name}")
         print("-" * 120)  # Widened to accommodate new columns
-        print(f"{'Spread':<15} | {'Midpoint':>10} | {'Days Between':>12} | {'Dates':>30}")
+        print(f"{'Spread':<20} | {'A/D':^3} | {'Midpoint':>10} | {'Days Between':>12} | {'Dates':>30}")
         print("-" * 120)  # Widened to accommodate new columns
         
         for row in range(4, 100):  # Start from row 4 where data begins
@@ -608,11 +676,11 @@ def print_full_snapshot(monitor, capture_time):
             mid = monitor.excel.read_cell(monitor.excel.sheet, f"{col3}{row}")
             
             if is_valid_spread(date1, date2, mid):
-                if isinstance(date1, datetime):
-                    date1 = date1.strftime("%b-%y").upper()
-                if isinstance(date2, datetime):
-                    date2 = date2.strftime("%b-%y").upper()
-                spread = f"{date1}-{date2}"
+                # Format spread name using new format
+                spread = monitor.format_spread_name(date1, date2)
+                
+                # Determine if this is an actual spread (only in Section 1, rows 4-29)
+                spread_type = "A" if section_idx == 0 and 4 <= row <= 29 else "D"
                 
                 # Calculate days between prompts
                 days = None
@@ -621,33 +689,33 @@ def print_full_snapshot(monitor, capture_time):
                 # Handle special cases with C and 3M
                 if date1 == 'C' and monitor.c_date:
                     date1_obj = monitor.c_date
-                    date2_obj = get_prompt_date(date2)
+                    date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
                         dates_str = f"{date1_obj.strftime('%Y-%m-%d')} → {date2_obj.strftime('%Y-%m-%d')}"
                 elif date1 == '3M' and monitor.three_m_date:
                     date1_obj = monitor.three_m_date
-                    date2_obj = get_prompt_date(date2)
+                    date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
                         dates_str = f"{date1_obj.strftime('%Y-%m-%d')} → {date2_obj.strftime('%Y-%m-%d')}"
                 elif date2 == '3M' and monitor.three_m_date:
-                    date1_obj = get_prompt_date(date1)
+                    date1_obj = get_prompt_date(date1)  # This will now return third Wednesday
                     date2_obj = monitor.three_m_date
                     if date1_obj:
                         days = abs((date2_obj - date1_obj).days)
                         dates_str = f"{date1_obj.strftime('%Y-%m-%d')} → {date2_obj.strftime('%Y-%m-%d')}"
                 else:
-                    days = calculate_days_between(date1, date2)
+                    days = calculate_days_between(date1, date2)  # This already uses third Wednesdays
                     if days is not None:
-                        date1_obj = get_prompt_date(date1)
-                        date2_obj = get_prompt_date(date2)
+                        date1_obj = get_prompt_date(date1)  # This will now return third Wednesday
+                        date2_obj = get_prompt_date(date2)  # This will now return third Wednesday
                         if date1_obj and date2_obj:
                             dates_str = f"{date1_obj.strftime('%Y-%m-%d')} → {date2_obj.strftime('%Y-%m-%d')}"
                 
                 days_str = str(days) if days is not None else "N/A"
                 
-                print(f"{spread:<15} | {float(mid):10.2f} | {days_str:>12} | {dates_str:>30}")
+                print(f"{spread:<20} | {spread_type:^3} | {float(mid):10.2f} | {days_str:>12} | {dates_str:>30}")
                 
                 # Initialize price point for monitoring but mark as recorded
                 if spread not in monitor.price_tracker:
@@ -677,6 +745,7 @@ def print_full_snapshot(monitor, capture_time):
 def show_recent_captures(minutes=5):
     """Show captures from the last N minutes."""
     session = Session()
+    monitor = None
     try:
         # Get captures from last N minutes
         since = datetime.utcnow() - timedelta(minutes=minutes)
@@ -691,10 +760,33 @@ def show_recent_captures(minutes=5):
             
         print(f"\nRecent changes (last {minutes} minutes):")
         print("-" * 120)
-        print(f"{'Timestamp':<25} | {'Spread':<15} | {'Days':>4} | {'Old Mid':>9} | {'New Mid':>9} | {'Change':>9}")
+        print(f"{'Timestamp':<25} | {'Spread':<15} | {'A/D':^3} | {'Days':>4} | {'Old Mid':>9} | {'New Mid':>9} | {'Change':>9}")
         print("-" * 120)
         
-        monitor = ExcelMonitor()  # Create monitor to access reference dates
+        # Create and initialize monitor
+        monitor = ExcelMonitor()
+        monitor.connect_to_excel()  # Connect to Excel
+        monitor.update_reference_dates()  # Update reference dates
+        
+        # Create a list to store all captures with their days
+        all_captures = []
+        
+        # First, build a set of actual spreads from Section 1 (rows 4-29)
+        actual_spreads = set()
+        if monitor and monitor.excel and monitor.excel.sheet:
+            try:
+                for row in range(4, 30):  # Rows 4-29 in Section 1
+                    date1 = monitor.excel.read_cell(monitor.excel.sheet, f"A{row}")
+                    date2 = monitor.excel.read_cell(monitor.excel.sheet, f"B{row}")
+                    if date1 and date2:
+                        # Format dates consistently
+                        if isinstance(date1, datetime):
+                            date1 = date1.strftime("%b-%y").upper()
+                        if isinstance(date2, datetime):
+                            date2 = date2.strftime("%b-%y").upper()
+                        actual_spreads.add((str(date1), str(date2)))
+            except:
+                print("\nWarning: Could not read actual spreads from Excel")
         
         for capture in captures:
             change = capture.new_midpoint - capture.old_midpoint
@@ -704,46 +796,71 @@ def show_recent_captures(minutes=5):
             elif change < 0:
                 change_str = color_text(change_str, RED)
                 
-            # Calculate days between for the spread - split on first hyphen only
-            parts = capture.spread_name.split('-', 1)  # Split on first hyphen only
-            if len(parts) == 2:
-                date1, date2 = parts
-                days = None
-                
-                # Handle special cases with C and 3M
-                if date1 == 'C' and monitor.c_date:
+            # Calculate days between for the spread using stored prompts
+            days = None
+            if capture.prompt1 and capture.prompt2:  # Use stored prompts from database
+                if capture.prompt1 == 'C' and monitor.c_date:
                     date1_obj = monitor.c_date
-                    date2_obj = get_prompt_date(date2)
+                    date2_obj = get_prompt_date(capture.prompt2)
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
-                elif date1 == '3M' and monitor.three_m_date:
+                elif capture.prompt1 == '3M' and monitor.three_m_date:
                     date1_obj = monitor.three_m_date
-                    date2_obj = get_prompt_date(date2)
+                    date2_obj = get_prompt_date(capture.prompt2)
                     if date2_obj:
                         days = abs((date2_obj - date1_obj).days)
-                elif date2.endswith('3M') and monitor.three_m_date:  # Handle cases where 3M is at the end
-                    date1_obj = get_prompt_date(date1)
+                elif capture.prompt2 == '3M' and monitor.three_m_date:
+                    date1_obj = get_prompt_date(capture.prompt1)
                     date2_obj = monitor.three_m_date
                     if date1_obj:
                         days = abs((date2_obj - date1_obj).days)
                 else:
-                    days = calculate_days_between(date1, date2)
-                
-                days_str = str(days) if days is not None else "N/A"
-            else:
-                days_str = "N/A"
+                    days = calculate_days_between(capture.prompt1, capture.prompt2)
             
-            print(f"{capture.timestamp.strftime('%Y-%m-%d %H:%M:%S'):<25} | "
-                  f"{capture.spread_name:<15} | "
+            days_str = str(days) if days is not None else "N/A"
+            
+            # Determine if this is an actual spread by checking against our set
+            spread_type = "A" if (str(capture.prompt1), str(capture.prompt2)) in actual_spreads else "D"
+            
+            # Store all capture info for sorting
+            all_captures.append((
+                capture.timestamp,
+                capture.spread_name,
+                spread_type,
+                days,  # Store actual days for sorting
+                days_str,  # Store string version for display
+                capture.old_midpoint,
+                capture.new_midpoint,
+                change_str
+            ))
+        
+        # Sort all captures by days (None values go to the end)
+        all_captures.sort(key=lambda x: float('inf') if x[3] is None else x[3])
+        
+        # Print all captures in a single sorted section
+        for (timestamp, spread_name, spread_type, days, days_str, old_mid, new_mid, change_str) in all_captures:
+            print(f"{timestamp.strftime('%Y-%m-%d %H:%M:%S'):<25} | "
+                  f"{spread_name:<15} | "
+                  f"{spread_type:^3} | "
                   f"{days_str:>4} | "
-                  f"{capture.old_midpoint:9.2f} | "
-                  f"{capture.new_midpoint:9.2f} | "
+                  f"{old_mid:9.2f} | "
+                  f"{new_mid:9.2f} | "
                   f"{change_str}")
             
         print(f"\nTotal changes: {len(captures)}")
         
     finally:
         session.close()
+        if monitor and monitor.excel:
+            try:
+                if IS_WINDOWS:
+                    if hasattr(monitor.excel, 'excel'):
+                        monitor.excel.excel.Quit()  # Windows specific cleanup
+                else:
+                    if hasattr(monitor.excel, 'wb') and hasattr(monitor.excel.wb, 'app'):
+                        monitor.excel.wb.app.quit()  # Mac specific cleanup
+            except Exception as e:
+                print(f"\nWarning: Error during Excel cleanup: {e}")
 
 def capture_with_stability(duration_minutes=None):
     """Run continuous capture with stability checks."""
@@ -759,8 +876,8 @@ def capture_with_stability(duration_minutes=None):
     print_full_snapshot(monitor, start_time)
     
     print("\nMonitoring for changes:")
-    print(f"{'Time':<25} | {'Type':<4s} | {'Spread':<15s} | {'Value/Change':<30s}")
-    print("-" * 80)
+    print(f"{'Time':<25} | {'Type':<4s} | {'A/D':^3} | {'Spread':<15s} | {'Days':>4} | {'Value/Change':<30s}")
+    print("-" * 100)
     
     try:
         while True:

@@ -1,5 +1,7 @@
 pandas>=2.0.0
-openpyxl>=3.1.0
+xlwings>=0.30.0  # For Mac Excel interaction
+pywin32>=305; sys_platform == 'win32'  # For Windows Excel interaction
+openpyxl>=3.1.0  # For general Excel file handling
 SQLAlchemy>=2.0.0
 python-dotenv>=1.0.0
 schedule>=1.2.0
