@@ -33,6 +33,7 @@ class MarketMaker:
         self.running = True
         self.last_snapshot_time = None
         self.stable_count = 0
+        self.stability_threshold = STABILITY_DURATION / INTERNAL_CHECK_INTERVAL
         self.logger = main_logger
 
         # Set up signal handlers
@@ -48,7 +49,7 @@ class MarketMaker:
         self.session.close()
         sys.exit(0)
 
-    def process_snapshot(self):
+    def process_snapshot(self) -> None:
         """
         Process a single snapshot of market data.
         Implements the stability logic and minimum change threshold.
@@ -74,8 +75,7 @@ class MarketMaker:
                 self.logger.debug("Price change detected, resetting stability counter")
                 return
 
-            # If price has been stable for required duration
-            if self.stable_count >= (STABILITY_DURATION / INTERNAL_CHECK_INTERVAL):
+            if self.stable_count >= self.stability_threshold:
                 self.logger.info("Price stability threshold reached, processing snapshot")
 
                 # Process and store changes
@@ -88,11 +88,11 @@ class MarketMaker:
 
                 self.stable_count = 0
 
-        except (ValueError, KeyError) as e:
+        except Exception as e:
             self.logger.error("Error processing snapshot: %(error)s", 
-                            {'error': str(e)}, exc_info=True)
+                              {'error': str(e)}, exc_info=True)
 
-    def run(self):
+    def run(self) -> None:
         """
         Main run loop of the market maker system.
         """
@@ -107,7 +107,10 @@ class MarketMaker:
 
         while self.running:
             schedule.run_pending()
-            time.sleep(0.1)
+            idle = schedule.idle_seconds()
+            if idle is None or idle <= 0:
+                idle = 0.1
+            time.sleep(idle)
 
 def main():
     """Entry point for the market maker system."""

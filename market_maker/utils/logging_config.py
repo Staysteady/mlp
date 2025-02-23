@@ -6,6 +6,7 @@ import logging
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+import os
 
 # Create logs directory if it doesn't exist
 LOGS_DIR = Path("logs")
@@ -18,6 +19,12 @@ EXCEL_LOG = LOGS_DIR / "excel_reader.log"
 
 def setup_logger(name: str, log_file: Path, level=logging.INFO):
     """Set up a logger with both file and console handlers."""
+    level_env = os.getenv("MARKET_MAKER_LOG_LEVEL")
+    if level_env:
+        try:
+            level = getattr(logging, level_env.upper(), level)
+        except Exception:
+            pass
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
